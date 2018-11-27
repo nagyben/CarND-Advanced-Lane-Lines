@@ -5,14 +5,15 @@ class Line:
     """
     Class used to store line information and the search_from_prior function
     """
-
     def __init__(self, x, y):
         """
         Creates a line with a polyfit of order 2 based on the x and y arguments
         :param x: The x-coordinate of the pixels
         :param y: The y-coordinate of the pixels
         """
-        self.fit = np.polyfit(x, y, 2)
+        self.x = x
+        self.y = y
+        self.fit = np.polyfit(y, x, 2)
         self.detected = True
         self.n_undetected = 0
 
@@ -52,7 +53,7 @@ class Line:
             return self
 
         try:
-            newLine = Line(y, x)
+            newLine = Line(x, y)
 
             # EWMA filter for lane line smoothing
             alpha = 0.8
@@ -82,6 +83,19 @@ class Line:
         """
         return ((1 + (2 * self.fit[0] * img_height + self.fit[1]) ** 2) ** 1.5) / np.abs(2 * self.fit[0])
 
+    def get_curvature_meters(self, img_height, xm_per_pix, ym_per_pix):
+        """
+        Returns the curvature of the road, in meters, at the vehicle's current position
+        Based on the x and y meters per pixel
+        :param img_height: The image height
+        :param xm_per_pix: The meters per pixel in the X axis
+        :param ym_per_pix: The meters per pixed in the Y axis
+        :return: The road curvature in meters
+        """
+        fit_cr = np.polyfit(self.y * ym_per_pix, self.x * xm_per_pix, 2)
+        R_curve = ((1 + (2 * fit_cr[0] * img_height * ym_per_pix + fit_cr[1]) ** 2) ** 1.5) / np.abs(2 * fit_cr[0])
+        return R_curve
+
     def get_polyline(self, img_height):
         """
         Returns the polylines for drawing the lane boundaries using cv.polyLine
@@ -92,3 +106,10 @@ class Line:
         fitx = np.array([fitx], np.int32).T
         ploty = np.array([ploty], np.int32).T
         return np.int32([np.concatenate((fitx, ploty), axis=1)])
+
+    def get_base(self, img_height):
+        """
+        Returns the x-coordinate of the base of the line
+        :return: integer
+        """
+        return np.int32(self.fit[0] * img_height ** 2 + self.fit[1] * img_height + self.fit[2])

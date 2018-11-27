@@ -29,7 +29,7 @@ def test_images():
         img = cv2.imread(fname)
 
         # Run pipeline
-        processed_img = lanefinder_pipeline(img)
+        processed_img = lanefinder_pipeline(img, debug=True)
         output_image = processed_img
 
         # Save image
@@ -38,15 +38,14 @@ def test_images():
 
 
 def video():
-    clip = VideoFileClip("challenge_video.mp4")
+    clip = VideoFileClip("project_video.mp4")
     output_clip = clip.fl_image(video_lanefinder_pipeline)
-    output_name = 'challenge_video_output.mp4'
+    output_name = 'project_video_output.mp4'
     output_clip.write_videofile(output_name, audio=False, threads=2)
 
 
 def video_lanefinder_pipeline(img):
-    return lanefinder_pipeline(img, video=True)
-    # return test_pipeline(img)
+    return lanefinder_pipeline(img, video=True, debug=False)
 
 
 def test_pipeline(img):
@@ -58,29 +57,36 @@ def test_pipeline(img):
     # Undistort
     undst = cv2.undistort(img, mtx, dist, None, mtx)
 
-    # Threshold on Sobel
-    sobelx_bin = sobel_binary(undst, SOBEL_MIN, SOBEL_MAX)
+    # Apply blur
+    gray = cv2.GaussianBlur(undst, (3, 3), 0)
+
+    # Sobel on Saturation and Lightness channels
+    hls = cv2.cvtColor(cv2.COLOR_BGR2HLS)
+    l = hls[:, :, 1]
+    s = hls[:, :, 2]
+    sobelx_l = sobel_binary(l, 150, 225, sobel_kernel=5)
+    sobelx_s = sobel_binary(s, 70, 225, sobel_kernel=7)
 
     # Yellow and white mask
-    yellow_mask = hsv_mask(undst, (0, 50), (100, 255), (100, 255))
-    white_mask = hsv_mask(undst, (20, 255), (0, 80), (180, 255))
+    yellow_mask = hsv_mask(gray, (0, 50), (100, 255), (100, 255))
+    white_mask = hsl_mask(gray, (0, 255), (0, 70), (150, 255))
 
     # Combine binary thresholds
-    comb_bin = np.zeros_like(sobelx_bin)
+    comb_bin = np.zeros_like(sobelx_l)
 
     # Combine masks and Sobel
-    comb_bin[(yellow_mask == 1) | (white_mask == 1) | (sobelx_bin == 1)] = 1
+    comb_bin[(yellow_mask == 1) | (white_mask == 1) | (sobelx_l == 1) | (sobelx_s == 1)] = 1
 
     # Ground plane perspective warp
     warped_bin = cv2.warpPerspective(comb_bin, ground_plane_mtx, (img.shape[1], img.shape[0]))
 
     warped_bin = np.dstack((warped_bin, warped_bin, warped_bin)) * 255
-    output_img = np.hstack((undst, warped_bin))
+    output_img = np.hstack((gray, warped_bin))
 
     return output_img
 
 
-def lanefinder_pipeline(img, video=False):
+def lanefinder_pipeline(img, video=False, debug=False):
     """
     The pipeline for laneline finding based on all the techniques used so far
     :param img: The image to find lanelines on
@@ -89,18 +95,28 @@ def lanefinder_pipeline(img, video=False):
     # Undistort
     undst = cv2.undistort(img, mtx, dist, None, mtx)
 
-    # Threshold on Sobel
-    sobelx_bin = sobel_binary(undst, SOBEL_MIN, SOBEL_MAX)
+    # Apply blur (remove noise)
+    undst = cv2.GaussianBlur(undst, (3, 3), 0)
+
+    # Sobel on Saturation and Lightness channels
+    hls = cv2.cvtColor(undst, cv2.COLOR_BGR2HLS)
+    l_ch = hls[:, :, 1]
+    s_ch = hls[:, :, 2]
+    sobelx_l = sobel_binary(l_ch, 35, 125, sobel_kernel=3)
+    sobelx_s = sobel_binary(s_ch, 35, 70, sobel_kernel=9)
+
+    gray = cv2.cvtColor(undst, cv2.COLOR_BGR2GRAY)
+    sobelx_gray = sobel_binary(gray, 255, 255)
 
     # Yellow and white mask
-    yellow_mask = hsv_mask(undst, (0, 50), (100, 255), (100, 255))
-    white_mask = hsv_mask(undst, (20, 255), (0, 80), (180, 255))
+    yellow_mask = hsv_mask(undst, (20, 120), (100, 255), (80, 255))
+    white_mask = hsl_mask(undst, (0, 255), (0, 200), (200, 255))
 
     # Combine binary thresholds
-    comb_bin = np.zeros_like(sobelx_bin)
+    comb_bin = np.zeros_like(sobelx_l)
 
-    # Combine masks and Sobel
-    comb_bin[(yellow_mask == 1) | (white_mask == 1) | (sobelx_bin == 1)] = 1
+    # Combine color and sobel masks
+    comb_bin[(yellow_mask == 1) | (white_mask == 1) | (sobelx_l == 1) | (sobelx_s == 1) | (sobelx_gray == 1)] = 1
 
     # Ground plane perspective warp
     warped_bin = cv2.warpPerspective(comb_bin, ground_plane_mtx, (img.shape[1], img.shape[0]))
@@ -108,24 +124,26 @@ def lanefinder_pipeline(img, video=False):
     # Get some Lines
     if video:
         global leftLine, rightLine
+
+        # if previous laneLine exists and the undetected frame counter is less than 5
         if leftLine is not None and leftLine.n_undetected < 5:
             leftLine = leftLine.search_from_prior(warped_bin, margin=50)
         else:
             # Get lane pixels using sliding windows
             leftx, lefty, rightx, righty, out_img = sliding_window(warped_bin)
-            leftLine = Line(lefty, leftx)
+            leftLine = Line(leftx, lefty)
 
         if rightLine is not None and rightLine.n_undetected < 5:
             rightLine = rightLine.search_from_prior(warped_bin, margin=50)
         else:
             # Get lane pixels using sliding windows
             leftx, lefty, rightx, righty, out_img = sliding_window(warped_bin)
-            rightLine = Line(righty, rightx)
+            rightLine = Line(rightx, righty)
     else:
         # Get lane pixels using sliding windows
         leftx, lefty, rightx, righty, out_img = sliding_window(warped_bin)
-        leftLine = Line(lefty, leftx)
-        rightLine = Line(righty, rightx)
+        leftLine = Line(leftx, lefty)
+        rightLine = Line(rightx, righty)
 
     ## Visualization ##
     # Create lane overlay image
@@ -144,7 +162,7 @@ def lanefinder_pipeline(img, video=False):
     cv2.polylines(line_img, rightLine.get_polyline(warped_bin.shape[0]), color=(255, 0, 0), isClosed=False,
                   thickness=8)
 
-    line_img_pre = cv2.addWeighted(line_img, 1, np.dstack((warped_bin, warped_bin, warped_bin)) * 255, 0.6, 0)
+    line_img_pre = cv2.addWeighted(line_img, 1, np.dstack((warped_bin, warped_bin, warped_bin)) * 255, 0.7, 0)
 
     # Get inverse transform matrix for drawing on original image
     _, inverse_ground_plane_mtx = cv2.invert(ground_plane_mtx)
@@ -153,7 +171,67 @@ def lanefinder_pipeline(img, video=False):
     # Combine images
     comb_bin = np.dstack((comb_bin, comb_bin, comb_bin)) * 255
     out_img = cv2.addWeighted(undst, 1, line_img, 0.5, 0)
-    out_img = np.hstack((out_img, line_img_pre))
+
+    # Get centerline offset
+    offsetx_m = (img.shape[1] / 2 - (leftLine.get_base(img.shape[0]) + (
+            rightLine.get_base(img.shape[0]) - leftLine.get_base(img.shape[0])) / 2)) * xm_per_pix
+
+    # Get curvature
+    R_curve = np.average((leftLine.get_curvature_meters(img.shape[0], xm_per_pix, ym_per_pix),
+                          rightLine.get_curvature_meters(img.shape[0], xm_per_pix, ym_per_pix)))
+
+    # Font and text properties
+    FONT = cv2.FONT_HERSHEY_SIMPLEX
+    FONT_SCALE = 0.7
+    LINE_WIDTH = 2
+    COLOR = (0, 0, 255)  # BGR
+
+    # Print curvature and centerline offset on img
+    cv2.putText(out_img, "Curvature: {:.1f}m".format(R_curve), (10, int(30 * FONT_SCALE)), FONT, FONT_SCALE, COLOR,
+                LINE_WIDTH,
+                cv2.LINE_AA)
+    cv2.putText(out_img, "Centerline offset: {:.2f}m".format(offsetx_m), (10, int(60 * FONT_SCALE)), FONT, FONT_SCALE,
+                COLOR,
+                LINE_WIDTH, cv2.LINE_AA)
+
+    if debug:
+        debug_imgs = [
+            (out_img, ""),
+            (cv2.cvtColor(sobelx_gray * 255, cv2.COLOR_GRAY2BGR), "sobelx_gray"),
+            (cv2.cvtColor(sobelx_l * 255, cv2.COLOR_GRAY2BGR), "sobelx_l"),
+            (cv2.cvtColor(sobelx_s * 255, cv2.COLOR_GRAY2BGR), "sobelx_s"),
+            (cv2.cvtColor(yellow_mask * 255, cv2.COLOR_GRAY2BGR), "yellow mask"),
+            (cv2.cvtColor(white_mask * 255, cv2.COLOR_GRAY2BGR), "white mask"),
+            (comb_bin, "combined"),
+            (line_img_pre, "warp")
+        ]
+
+        grid_square = 0
+        while True:
+            grid_square += 1
+            if grid_square ** 2 > len(debug_imgs):
+                break
+
+        debug_img_shape = (1440, 2560, 3)
+        debug_img_grid_shape = (int(debug_img_shape[0] / grid_square),
+                                int(debug_img_shape[1] / grid_square),
+                                3)
+
+        debug_img = np.zeros(debug_img_shape, np.int32)
+        for i, tuple in enumerate(debug_imgs):
+            image = tuple[0]
+            title = tuple[1]
+            cv2.putText(image, title, (10, 30), FONT, 1, COLOR, LINE_WIDTH, cv2.LINE_AA)
+            row = int(i / grid_square)
+            col = i % grid_square
+            debug_img[row * debug_img_grid_shape[0]:(row + 1) * debug_img_grid_shape[0],
+            col * debug_img_grid_shape[1]:(col + 1) * debug_img_grid_shape[1]] = cv2.resize(tuple[0], (
+            debug_img_grid_shape[1], debug_img_grid_shape[0]), interpolation=cv2.INTER_AREA)
+
+        out_img = debug_img
+
+    else:
+        out_img = np.hstack((out_img, line_img_pre))
 
     return out_img
 
@@ -224,10 +302,11 @@ def sliding_window(warped_bin):
 
 def get_ground_plane_transform():
     """
-    Function to test and get the ground plane transform
-    :return: transform matrix to use with cv2.warpPerspective
+    Function to test and get the ground plane transform and the
+    x/y meters per pixel based on the transformation
+    :return: A tuple of (t_mtx, xm_per_pix, ym_per_pix)
     """
-    img = cv2.imread('test_images/straight_lines1.jpg')
+    img = cv2.imread('curve-squeeze.png')
 
     # manually determined using image plotter
     road_plane = np.array([[195, img.shape[0]],
@@ -235,10 +314,21 @@ def get_ground_plane_transform():
                            [680, 446],
                            [1124, img.shape[0]]], np.float32)
 
-    dest_plane = np.array([[350, img.shape[0]],
-                           [350, 0],
-                           [900, 0],
-                           [900, img.shape[0]]], np.float32)
+    # squeeze factor for squeezing the image in the X direction
+    # This stops the lane lines curving off the side
+    # of the warped image which causes clipping of the
+    # lane visualization
+    sf = 0.3
+    dest_plane = np.array([[road_plane[0][0] + sf * (img.shape[1] / 2 - road_plane[0][0]), img.shape[0]],
+                           [road_plane[0][0] + sf * (img.shape[1] / 2 - road_plane[0][0]), 0],
+                           [road_plane[3][0] + sf * (road_plane[0][0] - img.shape[1] / 2), 0],
+                           [road_plane[3][0] + sf * (road_plane[0][0] - img.shape[1] / 2), img.shape[0]]], np.float32)
+
+    # assume that the top of the warp is 30m ahead of the vehicle
+    ym_per_pix = 30 / img.shape[0]
+
+    # assume that the lane width is 3.7m
+    xm_per_pix = 3.7 / (dest_plane[3][0] - dest_plane[0][0])
 
     t_mtx = cv2.getPerspectiveTransform(road_plane, dest_plane)
     img_size = (img.shape[1], img.shape[0])
@@ -248,22 +338,20 @@ def get_ground_plane_transform():
     cv2.polylines(perspective_transform_img, np.int32([dest_plane]), True, (0, 0, 255), thickness=2)
     output_img = np.hstack((img, perspective_transform_img))
 
-    cv2.imwrite('writeup_images/ground_plane_transform.jpg', output_img)
-    return t_mtx
+    cv2.imwrite('writeup_images/curve-squeeze.jpg', output_img)
+    return t_mtx, xm_per_pix, ym_per_pix
 
 
-def sobel_binary(img, sobel_min=0, sobel_max=255):
+def sobel_binary(img_bin, sobel_min=0, sobel_max=255, sobel_kernel=3):
     """
     Returns the thresholded Sobel binary
-    :param img: The image to run the filter on
+    :param img_bin: The image to run the filter on. Must be a single channel
     :param sobel_min: minimum Sobel threshold
     :param sobel_max: maximum Sobel threshold
     :return: binary image
     """
-    # Convert to grayscale
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     # Sobel filter (absolute and scaled)
-    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0)
+    sobelx = cv2.Sobel(img_bin, cv2.CV_64F, 1, 0, ksize=sobel_kernel)
     sobelx = np.abs(sobelx)
     sobelx = np.uint8(255 * sobelx / np.max(sobelx))
     sobelx_bin = np.zeros_like(sobelx)
@@ -330,7 +418,7 @@ def hsv_mask(img, hue_mask, sat_mask, val_mask):
     :param img: The image to mask
     :param hue_mask: Tuple of (hue_min, hue_max)
     :param sat_mask: Tuple of (sat_min, sat_max)
-    :param val_mask: Tuple of (val_min, val_max
+    :param val_mask: Tuple of (val_min, val_max)
     :return: Binary image mask
     """
     hue_mask = h_binary(img, hue_mask[0], hue_mask[1])
@@ -341,15 +429,33 @@ def hsv_mask(img, hue_mask, sat_mask, val_mask):
     return mask
 
 
+def hsl_mask(img, hue_mask, sat_mask, lht_mask):
+    """
+    Returns a binary image based on the mask thresholds
+    :param img: The image to mask
+    :param hue_mask: Tuple of (hue_min, hue_max)
+    :param sat_mask: Tuple of (sat_min, sat_max)
+    :param lht_mask: Tuple of (lht_min, lht_max)
+    :return: Binary image mask
+    """
+    hue_mask = h_binary(img, hue_mask[0], hue_mask[1])
+    sat_mask = s_binary(img, sat_mask[0], sat_mask[1])
+    lht_mask = l_binary(img, lht_mask[0], lht_mask[1])
+    mask = np.zeros_like(hue_mask)
+    mask[(hue_mask == 1) & (sat_mask == 1) & (lht_mask == 1)] = 1
+    return mask
+
+
 # Get camera undistortion matrices
 _, mtx, dist, _, _ = calibration.calibrateCamera()
 
 # Get ground plane transformation matrix
-ground_plane_mtx = get_ground_plane_transform()
+ground_plane_mtx, xm_per_pix, ym_per_pix = get_ground_plane_transform()
 
 # global laneline variables for video
 leftLine = None
 rightLine = None
 
 if __name__ == "__main__":
+    # test_images()
     video()
